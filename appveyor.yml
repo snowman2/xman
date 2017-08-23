@@ -1,0 +1,41 @@
+#-------------------------------------------------------------------------------
+# appveyor.yml
+# Author: Alan D. Snow, 2017
+#-------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+#System specifications for Appveyor
+#-------------------------------------------------------------------------------
+environment:
+  matrix:
+    - PYTHON_VERSION: "2.7"
+      MINICONDA: "C:\\Miniconda-x64"
+    - PYTHON_VERSION: "3.5"
+      MINICONDA: "C:\\Miniconda3-x64"
+    - PYTHON_VERSION: "3.6"
+      MINICONDA: "C:\\Miniconda3-x64"
+
+install:
+  - 'SET PATH=%MINICONDA%;%MINICONDA%\\Scripts;%PATH%'
+  - conda config --set always_yes yes
+  - conda update -q conda python
+#-----------------------------------------------------------------------------
+# Create test conda environment
+#-----------------------------------------------------------------------------
+  - conda create -n test python=%PYTHON_VERSION%
+  - activate test
+  - conda env update -n test -f conda_env.yml
+  # restart environment
+  - deactivate test
+  - activate test
+#-------------------------------------------------------------------------------
+# Install package
+----------------------------------------------------------------
+  - 'cd %APPVEYOR_BUILD_FOLDER%'
+  - pip install -e .[tests]
+
+build: false
+
+test_script:
+  - py.test --cov-report term-missing --cov=xman
+  - flake8 --ignore=F401 xman setup.py tests
+  - pylint xman
