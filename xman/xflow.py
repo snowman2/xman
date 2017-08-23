@@ -47,8 +47,49 @@ def get_xpolygon_bottom(cross_section_polygon, depth_from_bottom):
 
     extraction_poly = Polygon(extraction_poly_xy_list)
 
+    xpoly_bottom = cross_section_polygon.difference(extraction_poly)
     # get bottom polygon to depth
-    return cross_section_polygon.difference(extraction_poly)
+    return xpoly_bottom
+
+
+def get_flow_from_poly(simple_cross_section_polygon,
+                       channel_slope,
+                       mannings_roughness):
+    """
+    Returns the flow in m^3/s based on the input polygon,
+    the channel slope and mannings roughness.
+
+    Parameters:
+    -----------
+    simple_cross_section_polygon: :obj:`shapely.geometry.polygon.Polygon`
+        A polygon of a simple cross section with the top left coordinate
+        at the beginning of the array.
+    channel_slope: float,
+        Slope of the channel in m/m.
+    mannings_roughness: float
+        Value for Manning's roughness (N).
+
+    Returns:
+    --------
+    float
+        Flow in m^3/s.
+    """
+    # get wetted perimeter line
+    bot_x, bot_y = simple_cross_section_polygon.exterior.coords.xy
+
+    # make sure sorted
+    bot_x_sorted_idx = np.argsort(bot_x)
+    bot_x = np.array(bot_x)[bot_x_sorted_idx]
+    bot_y = np.array(bot_y)[bot_x_sorted_idx]
+
+    bottom_line = LineString(zip(bot_x[:-1], bot_y[:-1]))
+
+    # return flow
+    wetted_perimiter = bottom_line.length
+    cross_section_area = simple_cross_section_polygon.area
+    return ((1 / mannings_roughness) * cross_section_area *
+            (cross_section_area / wetted_perimiter) ** (2 / 3) *
+            channel_slope ** 0.5)
 
 
 def flow_from_xsection(cross_section_polygon,
@@ -76,26 +117,27 @@ def flow_from_xsection(cross_section_polygon,
     float
         Flow in m^3/s.
     """
-    bottom_poly = get_xpolygon_bottom(cross_section_polygon,
-                                      water_depth)
+    xpoly_bottom = get_xpolygon_bottom(cross_section_polygon,
+                                       water_depth)
+    if hasattr(xpoly_bottom, 'geoms'):
+        flow = 0
+        for poly_geom in xpoly_bottom.geoms:
+            flow += get_flow_from_poly(poly_geom,
+                                       channel_slope,
+                                       mannings_roughness)
+        return flow
 
-    # get wetted perimeter line
-    bot_x, bot_y = bottom_poly.exterior.coords.xy
-    bottom_line = LineString(zip(bot_x[:-1], bot_y[:-1]))
-
-    # return flow
-    wetted_perimiter = bottom_line.length
-    cross_section_area = bottom_poly.area
-    return ((1 / mannings_roughness) * cross_section_area *
-            (cross_section_area / wetted_perimiter) ** (2 / 3) *
-            channel_slope ** 0.5)
+    return get_flow_from_poly(xpoly_bottom,
+                              channel_slope,
+                              mannings_roughness)
 
 
 def find_depth_velocity_area(cross_section_polygon,
                              target_flow,
                              max_delta=0.01,
                              channel_slope=0.001,
-                             mannings_roughness=0.013):
+                             mannings_roughness=0.013,
+                             max_iterations=1000):
     """
     Iterative solver that calculates the depth, velocity,
     and area of the cross section filled with water.
@@ -114,7 +156,9 @@ def find_depth_velocity_area(cross_section_polygon,
         This is the slope of the channel (m/m). Default is 0.001.
     mannings_roughness: float, optional
         This is the manning's n roughness value of the channel.
-        Default os 0.013.
+        Default is 0.013.
+    max_iterations: int, optional
+        Maximum number of iterations. Default is 1000.
 
     Returns:
     --------
@@ -147,9 +191,11 @@ def find_depth_velocity_area(cross_section_polygon,
     """
     calc_flow = -9999.
 
-    y_coords = cross_section_polygon.exterior.coords.xy[1]
-    previous_depth_max = np.amax(y_coords)
-    previous_depth_min = np.amin(y_coords)
+    x_coords, y_coords = cross_section_polygon.exterior.coords.xy
+    y_coords = np.array(y_coords)[np.argsort(x_coords)]
+    max_y = min(y_coords[0], y_coords[-2])
+    previous_depth_max = max_y - np.amin(y_coords)
+    previous_depth_min = 0
     depth_guess = (previous_depth_max + previous_depth_min) / 2.
 
     # check flow bounds
@@ -165,7 +211,9 @@ def find_depth_velocity_area(cross_section_polygon,
 
     # iterate to find cross section matching discharge
     # with mannings equation
-    while np.abs(calc_flow - target_flow) > max_delta:
+    iii = 0
+    while np.abs(calc_flow - target_flow) > max_delta\
+            and iii < max_iterations:
         calc_flow = flow_from_xsection(cross_section_polygon,
                                        depth_guess,
                                        channel_slope,
@@ -177,12 +225,22 @@ def find_depth_velocity_area(cross_section_polygon,
             previous_depth_min = depth_guess
             depth_guess = (depth_guess + previous_depth_max) / 2.
 
-    bottom_poly = get_xpolygon_bottom(cross_section_polygon, depth_guess)
-    bot_y = bottom_poly.exterior.coords.xy[1]
-    depth = np.amax(bot_y) - np.amin(bot_y)
-    area = bottom_poly.area
+        iii += 1
 
-    return depth, area, (target_flow / area), bottom_poly
+    xpoly_bottom = get_xpolygon_bottom(cross_section_polygon, depth_guess)
+    if hasattr(xpoly_bottom, 'geoms'):
+        depth = []
+        area = []
+        velocity = []
+        for poly_geom in xpoly_bottom.geoms:
+            depth.append(poly_geom.bounds[-1] - poly_geom.bounds[1])
+            area.append(poly_geom.area)
+            velocity.append(target_flow / poly_geom.area)
+    else:
+        depth = xpoly_bottom.bounds[-1] - xpoly_bottom.bounds[1]
+        area = xpoly_bottom.area
+        velocity = (target_flow / area)
+    return depth, area, velocity, xpoly_bottom
 
 
 def plot_filled_cross_section(cross_section_polygon, water_filled_polygon):
@@ -225,7 +283,8 @@ def find_depth_velocity_area_plot(cross_section_polygon,
                                   target_flow,
                                   max_delta=0.01,
                                   channel_slope=0.001,
-                                  mannings_roughness=0.013):
+                                  mannings_roughness=0.013,
+                                  max_iterations=1000):
     """
     This workflow calculates the depth, velocity,
     and area of the cross section filled with water.
@@ -247,6 +306,8 @@ def find_depth_velocity_area_plot(cross_section_polygon,
     mannings_roughness: float, optional
         This is the manning's n roughness value of the channel.
         Default os 0.013.
+    max_iterations: int, optional
+        Maximum number of iterations. Default is 1000.
 
     Example::
 
@@ -271,8 +332,35 @@ def find_depth_velocity_area_plot(cross_section_polygon,
         max_delta,
         channel_slope,
         mannings_roughness,
+        max_iterations,
     )
-    print("DEPTH    {:.2f}".format(depth))
-    print("AREA     {:.2f}".format(area))
-    print("VELOCITY {:.2f}".format(velocity))
+    print("DEPTH    {}".format(depth))
+    print("AREA     {}".format(area))
+    print("VELOCITY {}".format(velocity))
     plot_filled_cross_section(cross_section_polygon, bottom_poly)
+
+if __name__ == "__main__":
+    from shapely.geometry import Polygon
+
+    xy_list = [
+     (47.056070295819055, 841),
+     (56.467284354982866, 835),
+     (65.878498414146677, 834),
+     (75.289712473310487, 834),
+     (84.700926532474298, 837),
+     (94.112140591638109, 837),
+     (103.52335465080192, 834),
+     (112.93456870996573, 834),
+     (122.34578276912954, 834),
+     (131.75699682829335, 838),
+     (141.16821088745718, 838),
+     (150.57942494662097, 838),
+     (159.99063900578477, 841),
+     (169.4018530649486, 841),
+     (178.81306712411242, 848)]
+    cross_section_polygon = Polygon(xy_list)
+    find_depth_velocity_area_plot(cross_section_polygon,
+                                  target_flow=500,
+                                  max_delta=0.01,
+                                  channel_slope=0.001,
+                                  mannings_roughness=0.013)
